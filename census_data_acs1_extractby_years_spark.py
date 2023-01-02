@@ -36,6 +36,13 @@ totalPopulationPandasDFByYear.reset_index(drop=False,inplace=True)
 # sparkDF from PandasDF
 sparkDF = spark.createDataFrame(totalPopulationPandasDFByYear)
 
+#County description gets converted to struct type when converting from padas to spark. We can ignore below transform
+# sparkDF=sparkDF.withColumn('countyName',sparkDF(df['county'],',').getItem(0))\
+#       .withColumn('stateName', split(split(sparkDF['county'],',').getItem(1),':').getItem(0))\
+#       .withColumn('summeryLevel', split(split(sparkDF['county'],',').getItem(1),':').getItem(2))\
+#       .withColumn('stateNumber', regexp_extract(split(split(sparkDF['county'],',').getItem(2),':').getItem(1),'\d+',0))\
+#       .withColumn('countyNumber', split(split(sparkDF['county'],',').getItem(2),':').getItem(2))
+
 # creating multiple columns with the first column
 sparkDF = sparkDF.withColumn("stateNumber", sparkDF["county_desc.geo._1._2"])\
                 .withColumn("countyNumber", sparkDF["county_desc.geo._2._2"])\
