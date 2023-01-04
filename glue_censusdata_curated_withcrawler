@@ -1,0 +1,90 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+import pandas as pd
+import censusdata
+import pyspark
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+from pyspark.sql import SparkSession
+import time
+import boto3
+
+## @params: [JOB_NAME]
+'''
+# sourceDatabase=dl_raw_db
+# sourceTable=censusdata_acs1
+# targetFile=s3://edl-curated-data/census_data_db/acs1
+# crawlerName=censusdata-s3-curated-crawler
+
+'''
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME','sourceDatabase','sourceTable','targetFile','crawlerName'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+# Get data from glue catalog
+sourceDatabase=args['sourceDatabase']
+sourceTable=args['sourceTable']
+censusdataAcs1DynFrame= glueContext.create_dynamic_frame.from_catalog(
+    database=sourceDatabase,
+    table_name=sourceTable,
+    transformation_ctx="censusdata_acs1_dynframe",
+)
+
+print("Data is read from glue database table")
+
+# convert the glue dynamic frame to dataframe
+censusdataAcs1DF=censusdataAcs1DynFrame.toDF()
+censusdataAcs1DF=censusdataAcs1DF.withColumn("stateNumber", censusdataAcs1DF["county_desc.geo._1._2"])\
+                .withColumn("countyNumber", censusdataAcs1DF["county_desc.geo._2._2"])\
+                .withColumn("countyName", split(censusdataAcs1DF["county_desc.name"], ',').getItem(0))\
+                .withColumn("stateName", split(censusdataAcs1DF["county_desc.name"], ',').getItem(1)).drop(censusdataAcs1DF['county_desc'])
+                
+# Renaming the columns
+colNameMapping = {'B01001_001E' : 'est_t', 'B01001_026E' : 'est_t_f', 'B01001_029E' : 'est_t_f_10_14', 'B01001_030E' : 'est_t_f_15_17', 'B01001_031E' : 'est_t_f_18_19', 'B01001_032E' : 'est_t_f_20', 'B01001_033E' : 'est_t_f_21', 'B01001_034E' : 'est_t_f_22_24', 'B01001_035E' : 'est_t_f_25_29', 'B01001_036E' : 'est_t_f_30_34', 'B01001_037E' : 'est_t_f_35_39', 'B01001_038E' : 'est_t_f_40_44', 'B01001_039E' : 'est_t_f_45_49', 'B01001_028E' : 'est_t_f_5_9', 'B01001_040E' : 'est_t_f_50_54', 'B01001_041E' : 'est_t_f_55_59', 'B01001_042E' : 'est_t_f_60_61', 'B01001_043E' : 'est_t_f_62_64', 'B01001_044E' : 'est_t_f_65_66', 'B01001_045E' : 'est_t_f_67_69', 'B01001_046E' : 'est_t_f_70_74', 'B01001_047E' : 'est_t_f_75_79', 'B01001_048E' : 'est_t_f_80_84', 'B01001_049E' : 'est_t_f_85_plus', 'B01001_027E' : 'est_t_f_5_under', 'B01001_002E' : 'est_t_m', 'B01001_005E' : 'est_t_m_10_14', 'B01001_006E' : 'est_t_m_15_17', 'B01001_007E' : 'est_t_m_18_19', 'B01001_008E' : 'est_t_m_20', 'B01001_009E' : 'est_t_m_21', 'B01001_010E' : 'est_t_m_22_24', 'B01001_011E' : 'est_t_m_25_29', 'B01001_012E' : 'est_t_m_30_34', 'B01001_013E' : 'est_t_m_35_39', 'B01001_014E' : 'est_t_m_40_44', 'B01001_015E' : 'est_t_m_45_49', 'B01001_004E' : 'est_t_m_5_9', 'B01001_016E' : 'est_t_m_50_54', 'B01001_017E' : 'est_t_m_55_59', 'B01001_018E' : 'est_t_m_60_61', 'B01001_019E' : 'est_t_m_62_64', 'B01001_020E' : 'est_t_m_65_66', 'B01001_021E' : 'est_t_m_67_69', 'B01001_022E' : 'est_t_m_70_74', 'B01001_023E' : 'est_t_m_75_79', 'B01001_024E' : 'est_t_m_80_84', 'B01001_025E' : 'est_t_m_85_plus', 'B01001_003E' : 'est_t_m_5_under'}
+
+for key, value in colNameMapping.items():
+    censusdataAcs1DF = censusdataAcs1DF.withColumnRenamed(key, value)
+
+targetFile=args['targetFile']    
+censusdataAcs1DF.repartition(1).write.mode("overwrite").parquet(targetFile)
+
+#Invoking crawler
+client = boto3.client('glue')
+crawlerName=args['crawlerName']
+#Check crawler status before starting
+while(1):
+    response = client.get_crawler(Name=crawlerName)
+    if(response['Crawler']['State']=='READY'):
+        client.start_crawler(Name=crawlerName)
+        break
+    else:
+        print("Crawler running. Next check in 30 secs")
+        time.sleep(30)
+
+
+#Check crawler completion status 
+while(1):
+    response = client.get_crawler(Name=crawlerName)
+    if(response['Crawler']['State']=='READY'):
+        break
+    else:
+        print("Crawler running. Next check in 30 secs")
+        time.sleep(30)
+
+print('Crawler execution successfully completed')
+print('Data load execution successfully completed')
+
+job.commit()
+   
+   
+    
+    
