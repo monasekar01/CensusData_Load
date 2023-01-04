@@ -1,0 +1,89 @@
+import sys
+from awsglue.transforms import *
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+import pandas as pd
+import censusdata
+import boto3
+import time
+
+
+## @params: [JOB_NAME]
+# --additional-python-modules=censusdata==1.15
+# years=2015,2016,2017,2018,2019,2021
+# targetFile=s3://edl-rawdata/census-data/acs1/
+# crawlerName=censusdata-s3-crawler
+
+
+args = getResolvedOptions(sys.argv, ['JOB_NAME','years','targetFile','crawlerName'])
+
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
+
+pd.set_option('display.expand_frame_repr', False)
+pd.set_option('display.precision', 2)
+
+years=args['years']
+totalPopulationPandasDFByYear=[]
+
+for year in years.split(','):
+    totalPopulationPandasDF = censusdata.download('acs1', int(year), censusdata.censusgeo([('county', '*')]),
+                                   ['B01001_001E','B01001_026E','B01001_029E','B01001_030E','B01001_031E','B01001_032E',
+                                    'B01001_033E','B01001_034E','B01001_035E', 'B01001_036E', 'B01001_037E', 'B01001_038E',
+                                    'B01001_039E', 'B01001_028E', 'B01001_040E', 'B01001_041E', 'B01001_042E', 'B01001_043E',
+                                    'B01001_044E', 'B01001_045E', 'B01001_046E', 'B01001_047E', 'B01001_048E', 'B01001_049E',
+                                    'B01001_027E', 'B01001_002E', 'B01001_005E', 'B01001_006E', 'B01001_007E', 'B01001_008E',
+                                    'B01001_009E', 'B01001_010E', 'B01001_011E', 'B01001_012E', 'B01001_013E', 'B01001_014E',
+                                    'B01001_015E', 'B01001_004E', 'B01001_016E', 'B01001_017E', 'B01001_018E', 'B01001_019E',
+                                    'B01001_020E', 'B01001_021E', 'B01001_022E', 'B01001_023E', 'B01001_024E', 'B01001_025E',
+                                    'B01001_003E'])
+    totalPopulationPandasDF['census_year'] = int(year)
+    totalPopulationPandasDFByYear.append(totalPopulationPandasDF)
+    print('Successfully downloaded the data for',year)
+totalPopulationPandasDFByYear=pd.concat(totalPopulationPandasDFByYear)  
+
+# Renaming the index as it was taking the first column as index and dropping while changing from pandasDF to sparkDF
+totalPopulationPandasDFByYear.index.rename('county_desc', inplace=True)
+totalPopulationPandasDFByYear.reset_index(drop=False,inplace=True)
+
+totalpopulationSparkDF=spark.createDataFrame(totalPopulationPandasDFByYear) 
+targetFile=args['targetFile']
+totalpopulationSparkDF.repartition(1).write.mode("overwrite").parquet(targetFile)
+print('Successfully created parquet file in s3')
+
+#Invoking crawler
+client = boto3.client('glue')
+crawlerName=args['crawlerName']
+
+#Check crawler status before starting
+while(1):
+    response = client.get_crawler(Name=crawlerName)
+    if(response['Crawler']['State']=='READY'):
+        client.start_crawler(Name=crawlerName)
+        break
+    else:
+        print("Crawler running. Next check in 30 secs")
+        time.sleep(30)
+
+
+#Check crawler completion status 
+while(1):
+    response = client.get_crawler(Name=crawlerName)
+    if(response['Crawler']['State']=='READY'):
+        break
+    else:
+        print("Crawler running. Next check in 30 secs")
+        time.sleep(30)
+
+print('Crawler execution successfully completed')
+print('Data load execution successfully completed')
+
+job.commit()
+
+
+
